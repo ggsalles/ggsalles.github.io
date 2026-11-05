@@ -193,7 +193,7 @@ const HIST={items:[],sessions:[],selectedSessionId:null,invites:[],inviteBusy:''
 const PUB={id:null,profile:null,stats:null,history:[],achievements:null,error:'',loading:false,statsHidden:false,historyHidden:false};
 const ACH={summary:null,loading:false,error:''};
 const FR={items:[],people:[],query:'',results:[],loading:false,searching:false,error:'',loaded:false,ranking:[],rankingLoading:false,activity:[],activityLoading:false,busy:'',panel:''};
-const CL={items:[],members:[],people:[],selectedId:null,loading:false,error:'',busy:'',createOpen:false};
+const CL={items:[],members:[],people:[],selectedId:null,loading:false,error:'',busy:'',createOpen:false,requests:[],invitations:[],links:[],events:[],registrations:[],inviteUrl:'',eventOpen:false,settingsOpen:false,inviteRedeemBusy:false,myRequest:null,incomingInvites:[]};
 const ACH_BADGES=[
 {id:'first_match',title:'Primera pala',desc:'Juega tu primer partido',group:'Actividad',mark:'01'},
 {id:'matches_10',title:'Calentando motores',desc:'Completa 10 partidos',group:'Actividad',mark:'10'},
@@ -352,12 +352,13 @@ async function loadClubs(){
   if(!sbc||!AU.user)return;
   CL.loading=true;CL.error='';paintClubs();
   try{
-    const [clubs,members]=await Promise.all([
-      sbc.from('clubs').select('id,name,description,city,created_by,created_at').order('created_at',{ascending:false}),
-      sbc.from('club_members').select('club_id,user_id,role,joined_at').order('joined_at',{ascending:true})
+    const [clubs,members,invitations]=await Promise.all([
+      sbc.from('clubs').select('id,name,description,city,created_by,created_at,avatar_url,banner_url,access_mode').order('created_at',{ascending:false}),
+      sbc.from('club_members').select('club_id,user_id,role,joined_at').order('joined_at',{ascending:true}),
+      sbc.from('club_invitations').select('id,club_id,invited_by,created_at').eq('invited_user_id',AU.user.id).eq('status','pending').order('created_at',{ascending:false})
     ]);
-    if(clubs.error)throw clubs.error;if(members.error)throw members.error;
-    CL.items=clubs.data||[];CL.members=members.data||[];
+    if(clubs.error)throw clubs.error;if(members.error)throw members.error;if(invitations.error)throw invitations.error;
+    CL.items=clubs.data||[];CL.members=members.data||[];CL.incomingInvites=invitations.data||[];
     const ids=[...new Set(CL.members.map(m=>m.user_id))];
     if(ids.length){const p=await sbc.from('profiles').select('id,display_name,alias,avatar_url').in('id',ids);if(p.error)throw p.error;CL.people=p.data||[]}else CL.people=[];
   }catch(error){console.warn('[clubs] load:',error&&error.message);CL.error='No se han podido cargar los clubes. Inténtalo de nuevo.'}
@@ -365,28 +366,99 @@ async function loadClubs(){
 }
 function clubPerson(id){return CL.people.find(p=>p.id===id)||{id,display_name:'Jugador',alias:''}}
 function clubMember(clubId,userId){return CL.members.find(m=>m.club_id===clubId&&m.user_id===userId)}
+function clubAdmin(id){const m=clubMember(id,AU.user&&AU.user.id);return !!m&&m.role==='admin'}
+function clubDate(v){return v?new Date(v).toLocaleString('es-ES',{dateStyle:'medium',timeStyle:'short'}):''}
+function clubEventType(t){return t==='training'?'Entrenamiento':t==='tournament'?'Torneo':'Quedada'}
+async function loadClubData(id){
+ if(!sbc||!AU.user)return;const mine=clubMember(id,AU.user.id);
+ try{const [req,inv,events,links]=await Promise.all([
+ mine&&mine.role==='admin'?sbc.from('club_join_requests').select('*').eq('club_id',id).eq('status','pending').order('created_at'):Promise.resolve({data:[],error:null}),
+ mine&&mine.role==='admin'?sbc.from('club_invitations').select('*').eq('club_id',id).eq('status','pending'):sbc.from('club_invitations').select('*').eq('club_id',id).eq('invited_user_id',AU.user.id).eq('status','pending'),
+ mine?sbc.from('club_events').select('*').eq('club_id',id).order('starts_at'):Promise.resolve({data:[],error:null}),
+ mine&&mine.role==='admin'?sbc.from('club_invite_links').select('*').eq('club_id',id).is('revoked_at',null).order('created_at',{ascending:false}):Promise.resolve({data:[],error:null})]);
+ for(const x of [req,inv,events,links])if(x.error)throw x.error;
+ CL.requests=req.data||[];CL.invitations=inv.data||[];CL.events=events.data||[];CL.links=links.data||[];CL.myRequest=null;
+ if(!mine){const mr=await sbc.from('club_join_requests').select('id,status,created_at').eq('club_id',id).eq('user_id',AU.user.id).eq('status','pending').maybeSingle();if(mr.error)throw mr.error;CL.myRequest=mr.data||null}
+ const eids=CL.events.map(x=>x.id);if(eids.length){const rr=await sbc.from('club_event_registrations').select('*').in('event_id',eids).order('created_at');if(rr.error)throw rr.error;CL.registrations=rr.data||[]}else CL.registrations=[];
+ const ids=[...new Set([...CL.requests.map(x=>x.user_id),...CL.invitations.flatMap(x=>[x.invited_by,x.invited_user_id]),...CL.registrations.map(x=>x.user_id)])].filter(x=>!CL.people.some(p=>p.id===x));
+ if(ids.length){const p=await sbc.from('profiles').select('id,display_name,alias,avatar_url').in('id',ids);if(p.error)throw p.error;CL.people=[...CL.people,...(p.data||[])]}
+ }catch(e){console.warn('[clubs] detail load',e);toast('No se ha podido actualizar toda la información del club.')}finally{paintClubs()}
+}
+async function cancelClubJoinRequest(){if(!CL.myRequest)return;const {error}=await sbc.from('club_join_requests').delete().eq('id',CL.myRequest.id);if(error){toast('No se ha podido cancelar la solicitud.');return}CL.myRequest=null;await loadClubData(CL.selectedId);toast('Solicitud cancelada.')}
+async function respondClubRequest(id,accept){try{const {error}=await sbc.rpc('respond_club_join_request',{p_request_id:id,p_accept:accept});if(error)throw error;toast(accept?'Solicitud aceptada.':'Solicitud rechazada.');await loadClubs();await loadClubData(CL.selectedId);loadMyAchievements()}catch(e){toast(e.message||'No se ha podido responder a la solicitud.')}}
+async function respondClubInvite(id,accept){try{const {error}=await sbc.rpc('respond_club_invitation',{p_invitation_id:id,p_accept:accept});if(error)throw error;toast(accept?'Ya formas parte del club.':'Invitación rechazada.');await loadClubs();if(CL.selectedId)await loadClubData(CL.selectedId);loadMyAchievements()}catch(e){toast(e.message||'No se ha podido responder a la invitación.')}}
+async function manageClubMember(userId,action){if(!confirm(action==='remove'?'¿Expulsar a este miembro?':action==='promote'?'¿Nombrar administrador?':'¿Retirar el rol de administrador?'))return;try{const {error}=await sbc.rpc('manage_club_member',{p_club_id:CL.selectedId,p_user_id:userId,p_action:action});if(error)throw error;await loadClubs();await loadClubData(CL.selectedId);loadMyAchievements();toast('Miembros actualizados.')}catch(e){toast(e.message||'No se ha podido modificar el miembro.')}}
+async function saveClubSettings(form){const fd=new FormData(form),name=String(fd.get('name')||'').trim();if(name.length<3||name.length>50){toast('El nombre debe tener entre 3 y 50 caracteres.');return}try{const {error}=await sbc.from('clubs').update({name,description:String(fd.get('description')||'').trim(),city:String(fd.get('city')||'').trim(),access_mode:String(fd.get('access_mode')||'open')}).eq('id',CL.selectedId);if(error)throw error;CL.settingsOpen=false;await loadClubs();await loadClubData(CL.selectedId);toast('Configuración guardada.')}catch(e){toast(e.message||'No se han podido guardar los cambios.')}}
+async function inviteClubMember(form){
+ const alias=String(new FormData(form).get('alias')||'').trim().replace(/^@/,'').toLowerCase();if(!alias)return;
+ try{const p=await sbc.from('profiles').select('id,alias').eq('alias',alias).maybeSingle();if(p.error)throw p.error;if(!p.data){toast('No se ha encontrado ese alias.');return}
+ if(p.data.id===AU.user.id||clubMember(CL.selectedId,p.data.id)){toast('Ese jugador ya es miembro o no puede ser invitado.');return}
+ const old=await sbc.from('club_invitations').select('id,status').eq('club_id',CL.selectedId).eq('invited_user_id',p.data.id).maybeSingle();if(old.error)throw old.error;
+ if(old.data&&old.data.status==='pending'){toast('Ya existe una invitación pendiente.');return}
+ if(old.data){const del=await sbc.from('club_invitations').delete().eq('id',old.data.id);if(del.error)throw del.error}
+ const ins=await sbc.from('club_invitations').insert({club_id:CL.selectedId,invited_user_id:p.data.id,invited_by:AU.user.id,status:'pending'});if(ins.error)throw ins.error;
+ form.reset();toast('Invitación enviada.');await loadClubData(CL.selectedId)
+ }catch(e){toast(e.message||'No se ha podido enviar la invitación.')}}
+async function createClubInviteLink(){try{const {data,error}=await sbc.from('club_invite_links').insert({club_id:CL.selectedId,created_by:AU.user.id}).select('token').single();if(error)throw error;CL.inviteUrl=location.origin+location.pathname+'?club_invite='+data.token;paintClubs();toast('Enlace creado.');await loadClubData(CL.selectedId)}catch(e){toast(e.message||'No se ha podido crear el enlace.')}}
+async function revokeClubInvitation(id){const {error}=await sbc.from('club_invitations').delete().eq('id',id);if(error){toast('No se ha podido revocar la invitación.');return}toast('Invitación revocada.');await loadClubData(CL.selectedId)}
+async function revokeClubInviteLink(id){if(!confirm('¿Revocar este enlace?'))return;const {error}=await sbc.from('club_invite_links').update({revoked_at:new Date().toISOString()}).eq('id',id);if(error){toast('No se ha podido revocar.');return}await loadClubData(CL.selectedId)}
+async function createClubEvent(form){
+ const fd=new FormData(form),start=new Date(String(fd.get('starts_at')||'')),endRaw=String(fd.get('ends_at')||''),end=endRaw?new Date(endRaw):null;
+ if(Number.isNaN(start.getTime())||start<=new Date()||(end&&Number.isNaN(end.getTime()))){toast('Comprueba las fechas.');return}
+ const payload={club_id:CL.selectedId,created_by:AU.user.id,title:String(fd.get('title')||'').trim(),description:String(fd.get('description')||''),event_type:String(fd.get('event_type')||'meetup'),location:String(fd.get('location')||''),starts_at:start.toISOString(),ends_at:end?end.toISOString():null,capacity:fd.get('capacity')?Number(fd.get('capacity')):null};
+ try{const {error}=await sbc.from('club_events').insert(payload);if(error)throw error;CL.eventOpen=false;form.reset();toast('Evento publicado.');await loadClubData(CL.selectedId)}catch(e){toast(e.message||'No se ha podido crear el evento.')}}
+async function registerClubEvent(id){try{const {data,error}=await sbc.rpc('register_club_event',{p_event_id:id});if(error)throw error;toast(data==='waitlist'?'Te has añadido a la lista de espera.':'¡Te has apuntado!');await loadClubData(CL.selectedId)}catch(e){toast(e.message||'No se ha podido completar la inscripción.')}}
+async function cancelClubEventRegistration(id){try{const {error}=await sbc.rpc('cancel_club_event_registration',{p_event_id:id});if(error)throw error;toast('Inscripción cancelada.');await loadClubData(CL.selectedId)}catch(e){toast(e.message||'No se ha podido cancelar.')}}
+async function deleteClubEvent(id){if(!confirm('¿Eliminar este evento y sus inscripciones?'))return;const {error}=await sbc.from('club_events').delete().eq('id',id);if(error){toast('No se ha podido eliminar.');return}await loadClubData(CL.selectedId)}
+async function uploadClubImage(input){
+ const file=input.files&&input.files[0];if(!file)return;
+ if(!['image/jpeg','image/png','image/webp'].includes(file.type)||file.size>5*1024*1024){toast('Usa JPG, PNG o WebP de máximo 5 MB.');input.value='';return}
+ const kind=input.dataset.clubImage,id=CL.selectedId,ext=file.type==='image/jpeg'?'jpg':file.type.split('/')[1],path=id+'/'+kind+'.'+ext;
+ try{const {error}=await sbc.storage.from('club-assets').upload(path,file,{upsert:true,contentType:file.type,cacheControl:'3600'});if(error)throw error;
+ const {data}=sbc.storage.from('club-assets').getPublicUrl(path),field=kind==='avatar'?'avatar_url':'banner_url';
+ const up=await sbc.from('clubs').update({[field]:data.publicUrl+'?v='+Date.now()}).eq('id',id);if(up.error)throw up.error;
+ await loadClubs();await loadClubData(id);toast('Imagen actualizada.')}catch(e){toast(e.message||'No se ha podido subir la imagen.')}finally{input.value=''}}
+async function redeemClubInviteFromUrl(){
+ const params=new URLSearchParams(location.search),token=params.get('club_invite');if(!token||!AU.user||CL.inviteRedeemBusy)return;CL.inviteRedeemBusy=true;
+ try{const {data,error}=await sbc.rpc('redeem_club_invite_link',{p_token:token});if(error)throw error;params.delete('club_invite');history.replaceState(null,'',location.pathname+(params.toString()?'?'+params.toString():'')+location.hash);await loadClubs();CL.selectedId=data;view='club-detail';render();await loadClubData(data);toast('Te has unido al club mediante invitación.');loadMyAchievements()}
+ catch(e){toast(e.message||'El enlace de invitación no es válido.')}finally{CL.inviteRedeemBusy=false}}
 function vClubs(){
   if(!AU.user)return '<h2>Clubes</h2><p class="lead">Crea un punto de encuentro para tu comunidad de pickleball.</p><div class="card acct">'+authInner()+'</div>';
   const cards=CL.items.map(c=>{
-    const mine=clubMember(c.id,AU.user.id),count=CL.members.filter(m=>m.club_id===c.id).length;
+    const mine=clubMember(c.id,AU.user.id),count=CL.members.filter(m=>m.club_id===c.id).length,mode=c.access_mode||'open';
     const searchText=esc([c.name,c.description,c.city].filter(Boolean).join(' ').toLocaleLowerCase('es'));
-    return '<article class="club-card" data-club-search-text="'+searchText+'"><div class="club-card-main"><div class="club-avatar">⌂</div><div class="club-card-copy"><b>'+esc(c.name)+'</b><span>'+esc(c.city||'Club de pickleball')+' · '+count+' '+(count===1?'miembro':'miembros')+'</span><p>'+esc(c.description||'Sin descripción.')+'</p></div></div><div class="club-card-actions">'+
-      (mine?'<span class="tag">'+(mine.role==='admin'?'Administrador':'Miembro')+'</span><button class="btn sm" data-club-open="'+c.id+'">Ver club</button>':'<button class="btn sm" data-club-join="'+c.id+'" '+(CL.busy==='join:'+c.id?'disabled':'')+'>'+(CL.busy==='join:'+c.id?'Uniéndote…':'Unirme')+'</button>')+
-      '</div></article>';
+    return '<article class="club-card" data-club-search-text="'+searchText+'"><div class="club-card-main"><div class="club-avatar">'+(c.avatar_url?'<img src="'+esc(c.avatar_url)+'" alt="">':'⌂')+'</div><div class="club-card-copy"><b>'+esc(c.name)+'</b><span>'+esc(c.city||'Club de pickleball')+' · '+count+' '+(count===1?'miembro':'miembros')+' · '+(mode==='open'?'Abierto':mode==='approval'?'Con aprobación':'Privado')+'</span><p>'+esc(c.description||'Sin descripción.')+'</p></div></div><div class="club-card-actions">'+(mine?'<span class="tag">'+(mine.role==='admin'?'Administrador':'Miembro')+'</span>':'<span class="tag">'+(mode==='open'?'Acceso libre':mode==='approval'?'Solicitud':'Por invitación')+'</span>')+'<button class="btn sm" data-club-open="'+c.id+'">Ver club</button></div></article>';
   }).join('');
-  const createForm=CL.createOpen?'<section class="card club-create-card"><div class="friends-section-head"><h3>Crear un club</h3><span class="section-kicker">NUEVA COMUNIDAD</span></div><form data-f="club-create"><label>Nombre del club</label><input name="name" maxlength="50" minlength="3" required placeholder="Ej. Pickleball Axarquía"><label>Descripción</label><textarea name="description" maxlength="500" rows="3" placeholder="¿Qué caracteriza a vuestro club?"></textarea><label>Ciudad o zona</label><input name="city" maxlength="80" placeholder="Ej. Rincón de la Victoria"><button class="btn" type="submit" '+(CL.busy==='create'?'disabled':'')+'>'+(CL.busy==='create'?'Creando…':'Crear club')+'</button></form></section>':'';
+  const createForm=CL.createOpen?'<section class="card club-create-card"><div class="friends-section-head"><h3>Crear un club</h3><span class="section-kicker">NUEVA COMUNIDAD</span></div><form data-f="club-create"><label>Nombre del club</label><input name="name" maxlength="50" minlength="3" required placeholder="Ej. Pickleball Axarquía"><label>Descripción</label><textarea name="description" maxlength="500" rows="3" placeholder="¿Qué caracteriza a vuestro club?"></textarea><label>Ciudad o zona</label><input name="city" maxlength="80" placeholder="Ej. Rincón de la Victoria"><label>Acceso al club</label><select name="access_mode"><option value="open">Abierto · cualquiera puede unirse</option><option value="approval">Con aprobación · el administrador acepta solicitudes</option><option value="private">Privado · solo mediante invitación</option></select><button class="btn" type="submit" '+(CL.busy==='create'?'disabled':'')+'>'+(CL.busy==='create'?'Creando…':'Crear club')+'</button></form></section>':'';
+  const inbox=CL.incomingInvites.map(i=>{const c=CL.items.find(x=>x.id===i.club_id);return '<div class="club-incoming-invite"><div><b>'+esc(c?c.name:'Un club')+'</b><small>Te han invitado a formar parte de este club.</small></div><button class="btn xs" data-club-invitation="accept" data-id="'+i.id+'">Aceptar</button><button class="btn xs ghost" data-club-invitation="reject" data-id="'+i.id+'">Rechazar</button></div>'}).join('');
   const listing=CL.loading?'<div class="card"><p class="hint">Cargando clubes…</p></div>':CL.error?'<div class="card err" role="alert">'+esc(CL.error)+'</div>':cards||'<div class="card empty">No hay clubes todavía. ¡Puedes crear el primero!</div>';
-  return '<div class="clubs-page"><div class="clubs-hero"><div><span class="section-kicker">PICKLE &amp; MIX · COMUNIDAD</span><h2>Clubes</h2><p>Encuentra tu comunidad, organiza jugadores y comparte tu pasión por el pickleball.</p></div><span class="clubs-hero-mark">⌂</span></div><div class="club-create-toggle"><button class="btn sm ghost" type="button" data-club-create-toggle aria-expanded="'+(CL.createOpen?'true':'false')+'">'+(CL.createOpen?'− Cancelar':'＋ Crear un club')+'</button></div>'+createForm+'<section class="clubs-list"><div class="clubs-list-head"><h3>Explorar clubes</h3><input aria-label="Buscar clubes" data-club-search placeholder="Buscar por nombre o ciudad"></div>'+listing+'</section></div>';
+  return '<div class="clubs-page"><div class="clubs-hero"><div><span class="section-kicker">PICKLE &amp; MIX · COMUNIDAD</span><h2>Clubes</h2><p>Encuentra tu comunidad, organiza jugadores y comparte tu pasión por el pickleball.</p></div><span class="clubs-hero-mark">⌂</span></div>'+(inbox?'<section class="card club-inbox"><h3>Invitaciones recibidas</h3>'+inbox+'</section>':'')+'<div class="club-create-toggle"><button class="btn sm ghost" type="button" data-club-create-toggle aria-expanded="'+(CL.createOpen?'true':'false')+'">'+(CL.createOpen?'− Cancelar':'＋ Crear un club')+'</button></div>'+createForm+'<section class="clubs-list"><div class="clubs-list-head"><h3>Explorar clubes</h3><input aria-label="Buscar clubes" data-club-search placeholder="Buscar por nombre o ciudad"></div>'+listing+'</section></div>';
 }
 function vClubDetail(){
   const c=CL.items.find(x=>x.id===CL.selectedId);if(!c)return vClubs();
-  const mine=clubMember(c.id,AU.user&&AU.user.id),members=CL.members.filter(m=>m.club_id===c.id),people=members.map(m=>{const p=clubPerson(m.user_id);return '<div class="club-member-row">'+(p.avatar_url?'<img class="av" src="'+esc(p.avatar_url)+'" alt="">':'<span class="av">'+esc((p.display_name||'?').slice(0,1).toUpperCase())+'</span>')+'<div><b>'+esc(p.display_name||'Jugador')+'</b><small>'+(p.alias?'@'+esc(p.alias):'')+'</small></div><span class="tag">'+(m.role==='admin'?'Administrador':'Miembro')+'</span></div>'}).join('');
-  return '<div class="clubs-page"><button class="btn sm ghost sessions-back" data-a="clubs">← Todos los clubes</button><section class="clubs-hero club-detail-hero"><div><span class="section-kicker">CLUB DE PICKLEBALL</span><h2>'+esc(c.name)+'</h2><p>'+esc(c.city||'Comunidad abierta')+'</p></div><span class="clubs-hero-mark">⌂</span></section><section class="card club-description"><p>'+esc(c.description||'Este club todavía no tiene descripción.')+'</p><div class="club-detail-meta"><span>'+members.length+' '+(members.length===1?'miembro':'miembros')+'</span><span>Creado el '+new Date(c.created_at).toLocaleDateString('es-ES')+'</span></div></section>'+(mine?'<section class="card club-members"><div class="friends-section-head"><h3>Miembros</h3><span class="friends-total">'+members.length+'</span></div>'+(people||'<p class="mut">Aún no hay miembros.</p>')+'</section>'+(mine.role==='admin'?'<button class="btn red" data-club-delete="'+c.id+'">Eliminar club</button>':'<button class="btn ghost" data-club-leave="'+c.id+'">Salir del club</button>'):'<section class="card club-join-card"><h3>Únete a este club</h3><p>Forma parte de esta comunidad y aparece en su lista de miembros.</p><button class="btn" data-club-join="'+c.id+'">Unirme al club</button></section>')+'</div>';
+  const mine=clubMember(c.id,AU.user&&AU.user.id),admin=mine&&mine.role==='admin',members=CL.members.filter(m=>m.club_id===c.id),mode=c.access_mode||'open';
+  const people=members.map(m=>{const p=clubPerson(m.user_id),owner=m.user_id===c.created_by;return '<div class="club-member-row">'+(p.avatar_url?'<img class="av" src="'+esc(p.avatar_url)+'" alt="">':'<span class="av">'+esc((p.display_name||'?').slice(0,1).toUpperCase())+'</span>')+'<div><b>'+esc(p.display_name||'Jugador')+(owner?' · Propietario':'')+'</b><small>'+(p.alias?'@'+esc(p.alias):'')+'</small></div><span class="tag">'+(m.role==='admin'?'Administrador':'Miembro')+'</span>'+(admin&&!owner&&m.user_id!==AU.user.id?'<div class="club-member-actions">'+(m.role==='admin'?'<button class="btn xs ghost" data-club-member-action="demote" data-id="'+m.user_id+'">Retirar admin</button>':'<button class="btn xs ghost" data-club-member-action="promote" data-id="'+m.user_id+'">Hacer admin</button>')+'<button class="btn xs red" data-club-member-action="remove" data-id="'+m.user_id+'">Expulsar</button></div>':'')+'</div>'}).join('');
+  const requests=CL.requests.map(r=>{const p=clubPerson(r.user_id);return '<div class="club-request-row"><div><b>'+esc(p.display_name||'Jugador')+'</b><small>'+(p.alias?'@'+esc(p.alias)+' · ':'')+clubDate(r.created_at)+'</small></div><button class="btn xs" data-club-request="accept" data-id="'+r.id+'">Aceptar</button><button class="btn xs ghost" data-club-request="reject" data-id="'+r.id+'">Rechazar</button></div>'}).join('');
+  const invited=CL.invitations.map(i=>{const p=clubPerson(i.invited_by),target=clubPerson(i.invited_user_id);return admin?'<div class="club-request-row"><div><b>'+esc(target.display_name||'Jugador invitado')+'</b><small>Invitación pendiente · '+(target.alias?'@'+esc(target.alias):'')+'</small></div><button class="btn xs red" data-club-invite-revoke="'+i.id+'">Revocar</button></div>':'<div class="club-request-row"><div><b>Te han invitado a este club</b><small>Por '+esc(p.display_name||'un administrador')+'</small></div><button class="btn xs" data-club-invitation="accept" data-id="'+i.id+'">Aceptar</button><button class="btn xs ghost" data-club-invitation="reject" data-id="'+i.id+'">Rechazar</button></div>'}).join('');
+  const links=CL.links.map(l=>'<div class="club-request-row"><div><b>Enlace de invitación</b><small>'+l.uses_count+' usos'+(l.expires_at?' · Caduca '+clubDate(l.expires_at):' · Sin caducidad')+'</small></div><button class="btn xs ghost" data-club-link-copy="'+l.token+'">Copiar</button><button class="btn xs red" data-club-link-revoke="'+l.id+'">Revocar</button></div>').join('');
+  const eventCards=CL.events.map(ev=>{
+    const regs=CL.registrations.filter(r=>r.event_id===ev.id),registered=regs.filter(r=>r.status==='registered'),wait=regs.filter(r=>r.status==='waitlist'),mineReg=regs.find(r=>r.user_id===AU.user.id),full=ev.capacity&&registered.length>=ev.capacity;
+    const attendeeNames=registered.slice(0,6).map(r=>esc(clubPerson(r.user_id).display_name||'Jugador')).join(', ');
+    return '<article class="club-event-card"><div class="club-event-top"><span class="tag">'+clubEventType(ev.event_type)+'</span>'+(ev.status==='cancelled'?'<span class="tag">Cancelado</span>':'')+'</div><h4>'+esc(ev.title)+'</h4>'+(ev.description?'<p>'+esc(ev.description)+'</p>':'')+'<div class="club-event-meta"><span>◷ '+clubDate(ev.starts_at)+'</span>'+(ev.location?'<span>⌖ '+esc(ev.location)+'</span>':'')+'<span>♟ '+registered.length+(ev.capacity?' / '+ev.capacity:'')+' inscritos'+(wait.length?' · '+wait.length+' en espera':'')+'</span></div>'+(attendeeNames?'<small class="club-event-attendees">'+attendeeNames+(registered.length>6?' y más':'')+'</small>':'')+'<div class="club-event-actions">'+(ev.status==='scheduled'&&!mineReg?'<button class="btn sm" data-club-event-register="'+ev.id+'">'+(full?'Apuntarme a lista de espera':'Apuntarme')+'</button>':'')+(mineReg?'<button class="btn sm ghost" data-club-event-cancel="'+ev.id+'">'+(mineReg.status==='waitlist'?'Salir de lista de espera':'Cancelar inscripción')+'</button>':'')+(admin?'<button class="btn sm red" data-club-event-delete="'+ev.id+'">Eliminar</button>':'')+'</div></article>';
+  }).join('');
+  const settings=admin?'<section class="card club-admin-section"><div class="friends-section-head"><h3>Configuración del club</h3><button class="btn xs ghost" data-club-settings-toggle>'+(CL.settingsOpen?'Cerrar':'Editar')+'</button></div>'+(CL.settingsOpen?'<form data-f="club-settings" class="club-admin-form"><label>Nombre</label><input name="name" maxlength="50" required value="'+esc(c.name)+'"><label>Descripción</label><textarea name="description" maxlength="500" rows="3">'+esc(c.description||'')+'</textarea><label>Ciudad o zona</label><input name="city" maxlength="80" value="'+esc(c.city||'')+'"><label>Acceso</label><select name="access_mode"><option value="open" '+(mode==='open'?'selected':'')+'>Abierto</option><option value="approval" '+(mode==='approval'?'selected':'')+'>Con aprobación</option><option value="private" '+(mode==='private'?'selected':'')+'>Privado · solo invitación</option></select><button class="btn" type="submit">Guardar cambios</button></form><div class="club-image-settings"><div><b>Imagen del club</b><small>JPG, PNG o WebP · máximo 5 MB</small><input type="file" accept="image/jpeg,image/png,image/webp" data-club-image="avatar"></div><div><b>Banner</b><small>Imagen horizontal · máximo 5 MB</small><input type="file" accept="image/jpeg,image/png,image/webp" data-club-image="banner"></div></div>':'<p class="mut">Acceso: '+(mode==='open'?'Abierto':mode==='approval'?'Con aprobación':'Privado')+'. Puedes cambiarlo y personalizar la imagen y el banner.</p>')+'</section>':'';
+  const adminTools=admin?'<section class="card club-admin-section"><h3>Invitar jugadores</h3><form data-f="club-invite" class="club-inline-form"><input name="alias" placeholder="@alias del jugador" required><button class="btn sm" type="submit">Enviar invitación</button></form><button class="btn sm ghost" data-club-link-create>＋ Crear enlace de invitación</button>'+(invited?'<div class="club-admin-list"><h4>Invitaciones pendientes</h4>'+invited+'</div>':'')+(CL.inviteUrl?'<div class="club-share-link"><input readonly value="'+esc(CL.inviteUrl)+'"><button class="btn sm" data-club-copy-current>Copiar enlace</button></div>':'')+(links?'<div class="club-admin-list">'+links+'</div>':'')+'</section>'+(CL.requests.length?'<section class="card club-admin-section"><h3>Solicitudes pendientes <span class="friends-total">'+CL.requests.length+'</span></h3>'+requests+'</section>':''):'';
+  const eventForm=admin&&CL.eventOpen?'<form data-f="club-event" class="club-admin-form"><label>Nombre del evento</label><input name="title" maxlength="90" required placeholder="Ej. Quedada del sábado"><label>Tipo</label><select name="event_type"><option value="meetup">Quedada</option><option value="training">Entrenamiento</option><option value="tournament">Torneo</option></select><label>Descripción</label><textarea name="description" maxlength="1200" rows="3"></textarea><label>Fecha y hora de inicio</label><input type="datetime-local" name="starts_at" required><label>Fecha y hora de fin (opcional)</label><input type="datetime-local" name="ends_at"><label>Lugar</label><input name="location" maxlength="180" placeholder="Pistas, dirección…"><label>Plazas (vacío = sin límite)</label><input type="number" name="capacity" min="2" max="500" placeholder="Ej. 16"><button class="btn" type="submit">Publicar evento</button></form>':'';
+  const headerBanner=c.banner_url?'<div class="club-cover" style="background-image:url(&quot;'+esc(c.banner_url)+'&quot;)"></div>':'';
+  return '<div class="clubs-page"><button class="btn sm ghost sessions-back" data-a="clubs">← Todos los clubes</button>'+headerBanner+'<section class="clubs-hero club-detail-hero"><div class="club-detail-identity">'+(c.avatar_url?'<img class="club-detail-avatar" src="'+esc(c.avatar_url)+'" alt="">':'')+'<div><span class="section-kicker">CLUB DE PICKLEBALL · '+(mode==='open'?'ABIERTO':mode==='approval'?'CON APROBACIÓN':'PRIVADO')+'</span><h2>'+esc(c.name)+'</h2><p>'+esc(c.city||'Comunidad de pickleball')+'</p></div></div><span class="clubs-hero-mark">⌂</span></section><section class="card club-description"><p>'+esc(c.description||'Este club todavía no tiene descripción.')+'</p><div class="club-detail-meta"><span>'+members.length+' '+(members.length===1?'miembro':'miembros')+'</span><span>Creado el '+new Date(c.created_at).toLocaleDateString('es-ES')+'</span></div></section>'+
+  (invited&&!admin?'<section class="card club-admin-section"><h3>Invitación pendiente</h3>'+invited+'</section>':'')+
+  (!mine&&!invited?'<section class="card club-join-card"><h3>Únete a este club</h3><p>'+(mode==='open'?'Este club permite el acceso libre.':mode==='approval'?'Envía una solicitud; el administrador tendrá que aceptarla.':'Este club es privado. Necesitas un enlace o una invitación directa.')+'</p>'+(mode==='private'?'<span class="tag">Acceso por invitación</span>':CL.myRequest?'<div class="club-pending-request"><span class="tag">Solicitud pendiente</span><button class="btn xs ghost" data-club-request-cancel>Cancelar solicitud</button></div>':'<button class="btn" data-club-join="'+c.id+'">'+(mode==='open'?'Unirme al club':'Solicitar unirme')+'</button>')+'</section>':'')+
+  (mine?'<section class="card club-members"><div class="friends-section-head"><h3>Miembros</h3><span class="friends-total">'+members.length+'</span></div>'+(people||'<p class="mut">Aún no hay miembros.</p>')+'</section>'+adminTools+settings+'<section class="card club-admin-section"><div class="friends-section-head"><h3>Eventos del club</h3>'+(admin?'<button class="btn sm" data-club-event-toggle>＋ Crear evento</button>':'')+'</div>'+eventForm+(eventCards||'<p class="mut">Todavía no hay eventos publicados.</p>')+'</section>'+(admin?'<button class="btn red" data-club-delete="'+c.id+'">Eliminar club</button>':'<button class="btn ghost" data-club-leave="'+c.id+'">Salir del club</button>'):'')+'</div>';
 }
 async function createClub(form){
   if(!sbc||!AU.user||CL.busy)return;
-  const fd=new FormData(form),name=String(fd.get('name')||'').trim(),description=String(fd.get('description')||'').trim(),city=String(fd.get('city')||'').trim();
-  if(name.length<3){toast('El nombre debe tener al menos 3 caracteres.');form.querySelector('[name="name"]')?.focus();return}
+  const fd=new FormData(form),name=String(fd.get('name')||'').trim(),description=String(fd.get('description')||'').trim(),city=String(fd.get('city')||'').trim(),access_mode=String(fd.get('access_mode')||'open');
+  if(name.length<3||name.length>50){toast('El nombre debe tener entre 3 y 50 caracteres.');form.querySelector('[name="name"]')?.focus();return}
   CL.busy='create';
   const btn=form.querySelector('button[type="submit"]');
   if(btn){btn.disabled=true;btn.textContent='Creando club…'}
@@ -396,8 +468,9 @@ async function createClub(form){
     if(!data)throw new Error('Supabase no devolvió el identificador del club.');
     await loadClubs();
     CL.selectedId=typeof data==='string'?data:data.id;
+    if(access_mode!=='open'){const modeUpdate=await sbc.from('clubs').update({access_mode}).eq('id',CL.selectedId);if(modeUpdate.error)throw modeUpdate.error;const created=CL.items.find(x=>x.id===CL.selectedId);if(created)created.access_mode=access_mode}
     if(!CL.selectedId)throw new Error('No se recibió el identificador del club creado.');
-    CL.createOpen=false;view='club-detail';render();toast('Club creado. ¡Ya eres su administrador!');
+    CL.createOpen=false;view='club-detail';render();await loadClubData(CL.selectedId);toast('Club creado. ¡Ya eres su administrador!');
     loadMyAchievements();
   }catch(error){
     console.warn('[clubs] create:',error&&error.code,error&&error.message,error&&error.details);
@@ -409,8 +482,8 @@ async function createClub(form){
 async function joinClub(id){
   if(!sbc||!AU.user||CL.busy)return;
   CL.busy='join:'+id;paintClubs();
-  try{const {error}=await sbc.from('club_members').insert({club_id:id,user_id:AU.user.id,role:'member'});if(error)throw error;await loadClubs();CL.selectedId=id;view='club-detail';paintClubs();toast('Te has unido al club.');loadMyAchievements()}
-  catch(error){console.warn('[clubs] join:',error&&error.message);toast('No se ha podido completar la inscripción. Puede que ya formes parte del club.')}
+  try{const {data,error}=await sbc.rpc('join_club',{p_club_id:id});if(error)throw error;await loadClubs();CL.selectedId=id;view='club-detail';render();await loadClubData(id);toast(data==='requested'?'Solicitud enviada al administrador.':data==='member'?'Ya perteneces a este club.':'Te has unido al club.');loadMyAchievements()}
+  catch(error){console.warn('[clubs] join:',error&&error.message);toast(error.message||'No se ha podido completar la solicitud.')}
   finally{CL.busy='';paintClubs()}
 }
 async function leaveClub(id){
@@ -926,15 +999,29 @@ const A={
   reset(){if(confirm('Se borrarán jugadores, partidos y resultados. ¿Seguro?')&&confirm('Última comprobación: ¿empezar una quedada nueva?')){S=fresh();SC={};ed=null;ct=1;tmp=null;view='home'}}
 };
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-a],[data-community-panel],[data-fa],[data-up],[data-linkplayer],[data-addself],[data-session-response],[data-session-open],[data-club-open],[data-club-join],[data-club-leave],[data-club-delete],[data-club-create-toggle],[data-sc],[data-ct],[data-del],[data-st],[data-pd],[data-edit],[data-mode],[data-pm]');if(!t)return;const d=t.dataset;
+  const t=e.target.closest('[data-a],[data-community-panel],[data-fa],[data-up],[data-linkplayer],[data-addself],[data-session-response],[data-session-open],[data-club-open],[data-club-join],[data-club-leave],[data-club-delete],[data-club-create-toggle],[data-club-settings-toggle],[data-club-link-create],[data-club-link-copy],[data-club-copy-current],[data-club-link-revoke],[data-club-invite-revoke],[data-club-request],[data-club-request-cancel],[data-club-invitation],[data-club-member-action],[data-club-event-toggle],[data-club-event-register],[data-club-event-cancel],[data-club-event-delete],[data-sc],[data-ct],[data-del],[data-st],[data-pd],[data-edit],[data-mode],[data-pm]');if(!t)return;const d=t.dataset;
   // Navegación explícita: no depende de las acciones genéricas del resto de la app.
   if(d.a==='friends'){view='friends';FR.error='';render();loadFriends();return}
   if(d.a==='profile'){view='profile';AU.profileSettingsOpen=false;render();if(AU.user){loadMyHistory();loadFriends()}return}
   if(d.a==='clubs'){view='clubs';CL.error='';CL.selectedId=null;render();loadClubs();return}
-  if(d.clubOpen){CL.selectedId=d.clubOpen;view='club-detail';render();return}
+  if(d.clubOpen){CL.selectedId=d.clubOpen;view='club-detail';CL.settingsOpen=false;CL.eventOpen=false;CL.inviteUrl='';render();loadClubData(d.clubOpen);return}
   if(d.clubJoin){joinClub(d.clubJoin);return}
   if(d.clubLeave){leaveClub(d.clubLeave);return}
   if(d.clubDelete){deleteClub(d.clubDelete);return}
+  if(d.clubSettingsToggle){CL.settingsOpen=!CL.settingsOpen;paintClubs();return}
+  if(d.clubLinkCreate){createClubInviteLink();return}
+  if(d.clubLinkCopy){const u=location.origin+location.pathname+'?club_invite='+d.clubLinkCopy;if(navigator.clipboard)navigator.clipboard.writeText(u).then(()=>toast('Enlace copiado.')).catch(()=>prompt('Copia este enlace:',u));else prompt('Copia este enlace:',u);return}
+  if(d.clubCopyCurrent){if(CL.inviteUrl&&navigator.clipboard)navigator.clipboard.writeText(CL.inviteUrl).then(()=>toast('Enlace copiado.')).catch(()=>prompt('Copia este enlace:',CL.inviteUrl));else if(CL.inviteUrl)prompt('Copia este enlace:',CL.inviteUrl);return}
+  if(d.clubLinkRevoke){revokeClubInviteLink(d.clubLinkRevoke);return}
+  if(d.clubInviteRevoke){revokeClubInvitation(d.clubInviteRevoke);return}
+  if(d.clubRequest){respondClubRequest(d.id,d.clubRequest==='accept');return}
+  if(d.clubRequestCancel){cancelClubJoinRequest();return}
+  if(d.clubInvitation){respondClubInvite(d.id,d.clubInvitation==='accept');return}
+  if(d.clubMemberAction){manageClubMember(d.id,d.clubMemberAction);return}
+  if(d.clubEventToggle){CL.eventOpen=!CL.eventOpen;paintClubs();return}
+  if(d.clubEventRegister){registerClubEvent(d.clubEventRegister);return}
+  if(d.clubEventCancel){cancelClubEventRegistration(d.clubEventCancel);return}
+  if(d.clubEventDelete){deleteClubEvent(d.clubEventDelete);return}
   if(d.clubCreateToggle){e.preventDefault();CL.createOpen=!CL.createOpen;paintClubs();return}
   if(d.sessionResponse){respondSessionInvitation(d.sessionResponse,d.id);return};if(d.sessionOpen){HIST.selectedSessionId=d.sessionOpen;view='session-detail';render();return}
   if(d.communityPanel){FR.panel=FR.panel===d.communityPanel?'':d.communityPanel;paintFriends();return}
@@ -954,8 +1041,8 @@ document.addEventListener('click',e=>{
   save();render();
 });
 document.addEventListener('input',e=>{const t=e.target;if(t.matches('form[data-f="add"] input[name="n"]')){const box=t.closest('form').querySelector('#player-suggestions'),raw=t.value.trim(),isMention=raw.startsWith('@'),q=raw.replace(/^@/,'').toLocaleLowerCase('es');if(!box)return;if(!isMention){box.hidden=true;box.innerHTML='';return}const ownAlias=String((AU.profile&&AU.profile.alias)||'').toLocaleLowerCase('es'),ownName=String((AU.profile&&AU.profile.display_name)||'').toLocaleLowerCase('es'),hasSelf=AU.user&&!S.players.some(x=>x.userId===AU.user.id)&&(q==='yo'||(q&&((ownAlias&&ownAlias.includes(q))||ownName.includes(q))));const self=hasSelf?'<button type="button" class="player-suggestion" data-addself><b>@'+esc(ownAlias||'yo')+'</b><small>'+esc((AU.profile&&AU.profile.display_name)||auName(AU.user))+'</small><span>Este eres tú</span></button>':'';const found=AU.user&&q?linkedFriends().filter(p=>!S.players.some(x=>x.userId===p.id)&&((p.alias||'').toLocaleLowerCase('es').includes(q)||(p.display_name||'').toLocaleLowerCase('es').includes(q))).slice(0,6):[];box.innerHTML=self+found.map(p=>'<button type="button" class="player-suggestion" data-linkplayer="'+p.id+'"><b>@'+esc(p.alias||p.display_name)+'</b><small>'+esc(p.display_name||'')+'</small><span>Vincular</span></button>').join('');box.hidden=!box.innerHTML}});
-document.addEventListener('change',e=>{if(e.target.matches('[data-avatar-file]'))uploadAvatar(e.target)});
-document.addEventListener('submit',e=>{e.preventDefault();if(e.target.dataset.f==='profile'){saveProfile(e.target);return}if(e.target.dataset.f==='friend-search'){searchFriends(e.target);return}if(e.target.dataset.f==='save-session'){savePlaySession(e.target);return}if(e.target.dataset.f==='club-create'){createClub(e.target);return}const f=e.target.dataset.f,v=e.target.n&&e.target.n.value;if(!v||!v.trim())return;if(f==='add'&&v.trim().startsWith('@')){const mention=v.trim().slice(1).toLocaleLowerCase('es'),ownAlias=String((AU.profile&&AU.profile.alias)||'').toLocaleLowerCase('es');if(AU.user&&(mention==='yo'||(ownAlias&&mention===ownAlias))){addSelfPlayer();return}toast('Selecciona una sugerencia para vincular a tu amigo.');return}
+document.addEventListener('change',e=>{if(e.target.matches('[data-avatar-file]'))uploadAvatar(e.target);if(e.target.matches('[data-club-image]'))uploadClubImage(e.target)});
+document.addEventListener('submit',e=>{e.preventDefault();if(e.target.dataset.f==='profile'){saveProfile(e.target);return}if(e.target.dataset.f==='friend-search'){searchFriends(e.target);return}if(e.target.dataset.f==='save-session'){savePlaySession(e.target);return}if(e.target.dataset.f==='club-create'){createClub(e.target);return}if(e.target.dataset.f==='club-settings'){saveClubSettings(e.target);return}if(e.target.dataset.f==='club-invite'){inviteClubMember(e.target);return}if(e.target.dataset.f==='club-event'){createClubEvent(e.target);return}const f=e.target.dataset.f,v=e.target.n&&e.target.n.value;if(!v||!v.trim())return;if(f==='add'&&v.trim().startsWith('@')){const mention=v.trim().slice(1).toLocaleLowerCase('es'),ownAlias=String((AU.profile&&AU.profile.alias)||'').toLocaleLowerCase('es');if(AU.user&&(mention==='yo'||(ownAlias&&mention===ownAlias))){addSelfPlayer();return}toast('Selecciona una sugerencia para vincular a tu amigo.');return}
   const r=addNames(v);if(r.added&&f==='addlive')replan('Jugador añadido.');
   if(r.dups.length)nerr=dupMsg(r.dups,r.added);
   save();render();
@@ -987,7 +1074,7 @@ function watchFriendships(userId){
     })
     .subscribe(status=>{if(status==='CHANNEL_ERROR'||status==='TIMED_OUT')console.warn('[friends] no se pudo conectar con las notificaciones en tiempo real')});
 }
-const auRedirect=()=>location.origin+location.pathname.replace(/index\.html$/,'');
+const auRedirect=()=>{const token=new URLSearchParams(location.search).get('club_invite');return location.origin+location.pathname.replace(/index\.html$/,'')+(token?'?club_invite='+encodeURIComponent(token):'')};
 const auName=u=>{const p=AU.profile&&u&&AU.profile.id===u.id?AU.profile:null,m=(u&&u.user_metadata)||{};return String((p&&p.display_name)||m.full_name||m.name||(u&&u.email?u.email.split('@')[0]:'')||'Jugador').trim().slice(0,40)||'Jugador'};
 const auPic=u=>{const p=AU.profile&&u&&AU.profile.id===u.id?AU.profile:null,m=(u&&u.user_metadata)||{},v=(p&&p.avatar_url)||m.avatar_url||m.picture||'';return/^https:\/\//i.test(v)?v:''};
 const auAvatar=u=>{const n=auName(u),i=esc(n.charAt(0).toUpperCase()||'?'),p=auPic(u);
@@ -1096,7 +1183,7 @@ if(typeof window!=='undefined'&&typeof document!=='undefined'){
       if(u&&(ch||ev==='INITIAL_SESSION'||ev==='USER_UPDATED'))AU.profileLoading=true;
       if(ch||ev==='INITIAL_SESSION'||ev==='USER_UPDATED')paintAuth();
       if(u&&(ch||ev==='INITIAL_SESSION'))watchFriendships(u.id);
-      if(u&&(ch||ev==='INITIAL_SESSION'||ev==='USER_UPDATED'))setTimeout(()=>{loadProfile(u.id);loadMyHistory();loadFriends();loadMyAchievements();if(view==='clubs')loadClubs()},0);
+      if(u&&(ch||ev==='INITIAL_SESSION'||ev==='USER_UPDATED'))setTimeout(()=>{loadProfile(u.id);loadMyHistory();loadFriends();loadMyAchievements();if(view==='clubs')loadClubs();redeemClubInviteFromUrl()},0);
       if(u&&ch&&AU.oauth&&ev==='SIGNED_IN'){AU.oauth=false;toast('Sesión iniciada como '+auName(u))}});
     setTimeout(()=>{if(!AU.ready){AU.ready=true;paintAuth()}},4000)}
   catch(e){sbc=null;console.warn('[auth] onAuthStateChange:',e&&e.message)}}
