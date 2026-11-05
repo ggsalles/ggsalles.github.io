@@ -404,7 +404,8 @@ function sessionSavePanel(){
   if(!AU.user)return '<div class="card"><h3>Guardar en tu historial</h3><p>Inicia sesión con Google para guardar esta quedada y consultar tus estadísticas desde cualquier dispositivo.</p><button class="btn" data-a="profile">Iniciar sesión / Mi perfil</button></div>';
   const players=S.players.filter(p=>done.some(m=>[...m.a,...m.b].includes(p.id)));
   const title='Quedada · '+new Date().toLocaleDateString('es-ES');
-  return '<form class="card session-save" data-f="save-session"><h3>Guardar en mi historial</h3><p class="mut">Elige qué jugador eres tú. Solo vincularemos tu propia cuenta; el resto aparecerá con los nombres de la quedada.</p><label for="session-title">Nombre de la quedada</label><input id="session-title" name="title" maxlength="80" required value="'+esc(title)+'"><label for="session-self">¿Cuál de estos jugadores eres tú?</label><select id="session-self" name="self_player_id" required><option value="">Selecciona tu jugador</option>'+players.map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join('')+'</select><button class="btn ball" type="submit">Guardar quedada</button></form>';
+  const selfOptions=players.filter(p=>!p.userId||p.userId===AU.user.id).map(p=>'<option value="'+p.id+'" '+(p.userId===AU.user.id?'selected':'')+'>'+esc(p.name)+(p.userId===AU.user.id?' · tú':'')+'</option>').join('');
+  return '<form class="card session-save" data-f="save-session"><h3>Guardar quedada</h3><p class="mut">Tu cuenta y las cuentas de los amigos vinculados con @ guardarán sus partidos en sus respectivos historiales. Los invitados aparecerán en el resultado, pero no acumularán estadísticas personales.</p><label for="session-title">Nombre de la quedada</label><input id="session-title" name="title" maxlength="80" required value="'+esc(title)+'"><label for="session-self">¿Cuál de estos jugadores eres tú?</label><select id="session-self" name="self_player_id" required><option value="">Selecciona tu jugador</option>'+selfOptions+'</select><button class="btn ball" type="submit">Guardar quedada</button></form>';
 }
 async function savePlaySession(form){
   if(!sbc||!AU.user)return;
@@ -412,7 +413,7 @@ async function savePlaySession(form){
   const selfId=Number(form.querySelector('[name="self_player_id"]').value),title=String(form.querySelector('[name="title"]').value||'').trim();
   const done=S.matches.filter(m=>m.status==='done');
   if(!selfId||!S.players.some(p=>p.id===selfId)||!done.length){toast('Selecciona tu jugador y comprueba que haya resultados.');return}
-  const players=S.players.map(p=>{const team=(S.teams||[]).find(t=>t.p.includes(p.id));return{local_id:p.id,player_name:p.name,team_id:team?team.id:null}});
+  const players=S.players.map(p=>{const team=(S.teams||[]).find(t=>t.p.includes(p.id));return{local_id:p.id,player_name:p.name,user_id:p.userId||(p.id===selfId?AU.user.id:null),team_id:team?team.id:null}});
   const matches=done.map(m=>({match_number:S.matches.indexOf(m)+1,cycle:m.cycle||null,court:m.court||null,phase:m.ph==='g'?'group':m.ph==='ko'?'knockout':'rot',side_a_score:m.sa,side_b_score:m.sb,side_a_player_ids:m.a,side_b_player_ids:m.b}));
   const btn=form.querySelector('button[type="submit"]');if(btn){btn.disabled=true;btn.textContent='Guardando…'}
   try{
@@ -487,8 +488,8 @@ function rotSummary(){
   <div class="sl"><span class="ic">⏱</span><div>Duración estimada: <b>aprox. ${fmtMin(r.tot)}</b><br><span class="mut">${r.rounds} turnos de ~${Math.round(r.dur)} min + 2 min de transición, con ${r.P} partido${r.P>1?'s':''} a la vez. Estimación aproximada, no una garantía.</span></div></div></div>`}
 function vSetup(){const c=S.settings,n=S.players.length,per=Math.floor(n/4)||0,T=Math.floor(n/2),tot=FX()?fxTotal(T):(n>=4?Math.ceil(n*c.cycles/4):0);
   return`<h2>Prepara la quedada</h2><p class="lead">Añade a los jugadores y ajusta pistas, puntos${FX()?'':' y ciclos'}.</p>${modeSel()}
-  <form class="card" data-f="add"><label class="mut">Añadir jugadores (uno o varios separados por comas o líneas)</label><div class="row"><input name="n" autocomplete="off" placeholder="Nombre"><button class="btn sm fix">Añadir</button></div>${nameErrBox()}</form>
-  <div class="card">${n?S.players.map(p=>`<div class="row" style="margin:6px 0"><input value="${esc(p.name)}" data-ren="${p.id}" aria-label="Nombre"><button class="btn sm red fix" data-del="${p.id}" aria-label="Eliminar ${esc(p.name)}">✕</button></div>`).join(''):'<div class="empty">👥<br><b>Aún no hay jugadores</b><br>Añade al menos 4 para empezar.</div>'}</div>
+  <form class="card player-add" data-f="add"><label class="mut">Añadir jugadores</label><div class="row"><input name="n" autocomplete="off" placeholder="Nombre o @alias"><button class="btn sm fix">Añadir</button></div><div id="player-suggestions" class="player-suggestions" hidden></div><p class="hint">Usa un nombre normal para invitados o <b>@alias</b> para vincular a un amigo. Los invitados salen en el resultado de la quedada, pero sus estadísticas no se guardan en un perfil.</p>${nameErrBox()}</form>
+  <div class="card">${n?S.players.map(p=>`<div class="row player-entry" style="margin:6px 0"><input value="${esc(p.name)}" data-ren="${p.id}" aria-label="Nombre"><span class="player-account ${p.userId?'linked':''}">${p.userId?'Cuenta vinculada':'Invitado'}</span><button class="btn sm red fix" data-del="${p.id}" aria-label="Eliminar ${esc(p.name)}">✕</button></div>`).join(''):'<div class="empty">👥<br><b>Aún no hay jugadores</b><br>Añade al menos 4 para empezar.</div>'}</div>
   ${pairsCard()}
   <div class="card"><div class="row"><label>Pistas<input type="number" min="1" max="4" value="${c.courts}" data-set="courts"></label><label>Puntos<input type="number" min="3" max="21" value="${c.points}" data-set="points"></label>${FX()?'':`<label>Ciclos<input type="number" min="1" max="${CMAX}" value="${c.cycles}" data-set="cycles"></label>`}</div>${FX()?'':'<p class="hint">🔁 <b>Ciclos</b> = partidos que juega cada persona.</p>'}</div>
   ${FX()?fxFlow():rotSummary()}
@@ -672,6 +673,7 @@ const normName=s=>String(s).normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+
 const nameTaken=(n,except)=>S.players.some(p=>p.id!==except&&normName(p.name)===normName(n));
 function addNames(txt){const names=txt.split(/[\n,;]+/).map(s=>s.trim().slice(0,24).trim()).filter(Boolean),dups=[];let added=0;
   names.forEach(n=>{if(nameTaken(n)){if(!dups.includes(n))dups.push(n);return}S.players.push({id:S.nid++,name:n,status:'active'});added++});return{added,dups}}
+function linkedFriends(){if(!AU.user)return[];const ids=new Set(FR.items.filter(f=>f.status==='accepted').map(f=>f.requester_id===AU.user.id?f.addressee_id:f.requester_id));return FR.people.filter(p=>ids.has(p.id))}
 const dupMsg=(dups,added)=>(dups.length===1?`«${dups[0]}» ya existe. Usa un nombre distinto, por ejemplo «${dups[0]} A» o una abreviatura.`:`Ya existen: ${dups.map(d=>`«${d}»`).join(', ')}. Usa nombres distintos, por ejemplo añadiendo una inicial.`)+(added?' El resto se ha añadido.':'');
 /* Límite de puntos: nadie puede pasar de P, salvo en el desempate por diferencia de 2 (p. ej. a 9: 10-8, 11-9, 12-10…) */
 const okState=(a,b,P)=>Math.max(a,b)<=P||Math.abs(a-b)<=2;
@@ -741,11 +743,12 @@ const A={
   reset(){if(confirm('Se borrarán jugadores, partidos y resultados. ¿Seguro?')&&confirm('Última comprobación: ¿empezar una quedada nueva?')){S=fresh();SC={};ed=null;ct=1;tmp=null;view='home'}}
 };
 document.addEventListener('click',e=>{
-  const t=e.target.closest('[data-a],[data-fa],[data-up],[data-sc],[data-ct],[data-del],[data-st],[data-pd],[data-edit],[data-mode],[data-pm]');if(!t)return;const d=t.dataset;
+  const t=e.target.closest('[data-a],[data-fa],[data-up],[data-linkplayer],[data-sc],[data-ct],[data-del],[data-st],[data-pd],[data-edit],[data-mode],[data-pm]');if(!t)return;const d=t.dataset;
   // Navegación explícita: no depende de las acciones genéricas del resto de la app.
   if(d.a==='friends'){view='friends';FR.error='';render();loadFriends();return}
   if(d.a==='profile'){view='profile';AU.profileSettingsOpen=false;render();if(AU.user){loadMyHistory();loadFriends()}return}
   if(d.fa){friendAction(d.fa,d.id);return}
+  if(d.linkplayer){const friend=linkedFriends().find(p=>p.id===d.linkplayer);if(friend&&!S.players.some(p=>p.userId===friend.id)){let name=(friend.display_name||friend.alias||'Jugador').slice(0,24);if(nameTaken(name))name=('@'+(friend.alias||friend.display_name||'amigo')).slice(0,24);S.players.push({id:S.nid++,name,userId:friend.id,status:'active'});save()}else if(friend)toast('Ese amigo ya está en la quedada.');render();return}
   if(d.up){openUserProfile(d.up);return}
   if(d.a){A[d.a]();}
   else if(d.sc){const c=d.sc[0],v=+d.sc.slice(1),r=scoreStep(tmp,c,v,S.settings.points);if(r.ok)tmp[c]=r.val;else toast(r.msg);$('#app').innerHTML=header()+vGame()+foot();return}
@@ -758,8 +761,9 @@ document.addEventListener('click',e=>{
   else if(d.pd){const p=S.players.find(x=>x.id==d.pd);if(!confirm(`¿Quitar a ${p.name}? Sus partidos jugados se conservan.`))return;p.status='out';p.removed=true;S.players=S.players.filter(x=>x!==p||S.matches.some(m=>m.status==='done'&&[...m.a,...m.b].includes(p.id)));replan('Jugador quitado.')}
   save();render();
 });
+document.addEventListener('input',e=>{const t=e.target;if(t.matches('form[data-f="add"] input[name="n"]')){const box=t.closest('form').querySelector('#player-suggestions'),q=t.value.trim().replace(/^@/,'').toLocaleLowerCase('es');if(!box)return;const found=AU.user&&q?linkedFriends().filter(p=>!S.players.some(x=>x.userId===p.id)&&((p.alias||'').toLocaleLowerCase('es').includes(q)||(p.display_name||'').toLocaleLowerCase('es').includes(q))).slice(0,6):[];box.innerHTML=found.map(p=>'<button type="button" class="player-suggestion" data-linkplayer="'+p.id+'"><b>@'+esc(p.alias||p.display_name)+'</b><small>'+esc(p.display_name||'')+'</small><span>Vincular</span></button>').join('');box.hidden=!found.length}});
 document.addEventListener('change',e=>{if(e.target.matches('[data-avatar-file]'))uploadAvatar(e.target)});
-document.addEventListener('submit',e=>{e.preventDefault();if(e.target.dataset.f==='profile'){saveProfile(e.target);return}if(e.target.dataset.f==='friend-search'){searchFriends(e.target);return}if(e.target.dataset.f==='save-session'){savePlaySession(e.target);return}const f=e.target.dataset.f,v=e.target.n.value;if(!v.trim())return;
+document.addEventListener('submit',e=>{e.preventDefault();if(e.target.dataset.f==='profile'){saveProfile(e.target);return}if(e.target.dataset.f==='friend-search'){searchFriends(e.target);return}if(e.target.dataset.f==='save-session'){savePlaySession(e.target);return}const f=e.target.dataset.f,v=e.target.n.value;if(!v.trim())return;if(f==='add'&&v.trim().startsWith('@')){toast('Selecciona una sugerencia para vincular a tu amigo.');return}
   const r=addNames(v);if(r.added&&f==='addlive')replan('Jugador añadido.');
   if(r.dups.length)nerr=dupMsg(r.dups,r.added);
   save();render();
