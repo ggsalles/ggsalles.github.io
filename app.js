@@ -556,7 +556,7 @@ document.addEventListener('change',e=>{const t=e.target;
    Fase 1: solo identidad (nombre y avatar). No se lee ni se escribe ninguna tabla de Supabase.
    La clave «publishable» está pensada para ir en el navegador; lo que protege los datos son las políticas RLS del proyecto.
    NUNCA pongas aquí la clave secreta de Supabase ni el Client Secret de Google (van solo en el panel de Supabase). */
-const SB_URL='https://bcjfwxcknykurnfcispi.supabase.co',SB_KEY='sb_publishable_smETUaBvYqfPKN80C4wIBg_DnFcpwoD',GUEST_K='pickleMix.auth.guest';
+const SB_URL='https://woolozllrvabjrflmqec.supabase.co',SB_KEY='sb_publishable_A3wn2gZDvhIpIkAdg4riuA_6GpG41oS',GUEST_K='pickleMix.auth.guest';
 const AU={user:null,ready:false,busy:false,err:'',guest:false,oauth:false};
 let sbc=null;
 const auRedirect=()=>location.origin+location.pathname.replace(/index\.html$/,'');
